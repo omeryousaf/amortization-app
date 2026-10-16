@@ -1,9 +1,9 @@
 # Loan amortization calculator
 
-A fixed-rate amortization schedule with an optional grace period. When grace is greater than zero, the calculator supports all three interest treatments:
+A fixed-rate amortization schedule with an optional grace period. Principal can be repaid with a level installment or in equal principal amounts. When grace is greater than zero, the calculator supports all three interest treatments:
 
 1. **Capitalize into principal** — interest accrues during grace and is added to principal when repayment starts.
-2. **Accrue separately** — principal is unchanged during grace; interest sits in a non-interest-bearing bucket. After grace, interest is charged only on principal. Payments apply to current interest, then the accrued bucket, then principal. The last payment absorbs leftover accrued interest.
+2. **Accrue separately** — principal is unchanged during grace; interest sits in a non-interest-bearing bucket. After grace, interest is charged only on principal, and the accrued bucket is repaid over the remaining term. A level payment applies to current interest, then the accrued bucket, then principal. An equal-principal payment pays current interest, an equal slice of the accrued bucket, and an equal slice of principal. The last payment absorbs leftover accrued interest.
 3. **Lender-subsidized** — no borrower interest during grace; original principal is amortized over the remaining term.
 
 ## Run locally
@@ -31,8 +31,8 @@ npm run start
 ## Assumptions
 
 - Fixed interest rate
-- Fully amortizing after grace (no balloon)
+- Fully amortizing after grace (no balloon), either level payment or equal principal
 - Payments in arrears
 - Accrual matches payment frequency
-- Scheduled payment is rounded to the cent; the last payment absorbs leftover cents
+- Scheduled amounts are rounded to the cent; the last payment absorbs leftover cents
 - Late-pay (days-after-due) grace is out of scope

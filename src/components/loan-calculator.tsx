@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import {
+  AMORTIZATION_META,
   buildSchedule,
   compareTreatments,
   FREQUENCY_META,
@@ -32,6 +33,7 @@ const defaultValues: FormValues = {
   startDate: "2026-01-01",
   graceMonths: "0",
   treatment: "capitalize",
+  amortizationMethod: "level",
 };
 
 export function LoanCalculator() {
@@ -55,8 +57,8 @@ export function LoanCalculator() {
           Loan amortization
         </h1>
         <p className="max-w-2xl text-sm leading-6 text-muted-foreground sm:text-base">
-          Build a fully amortizing schedule from principal, rate, term, and
-          payment frequency. When a grace period is included, compare
+          Build a fully amortizing schedule with a level installment or equal
+          principal repayments. When a grace period is included, compare
           capitalizing interest, holding it in a separate accrued bucket, or
           having the lender subsidize it.
         </p>
@@ -108,9 +110,17 @@ export function LoanCalculator() {
             <>
               <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
                 <SummaryCard
-                  label="Level payment"
+                  label={
+                    result.input.amortizationMethod === "equal-principal"
+                      ? "Principal each period"
+                      : "Level payment"
+                  }
                   value={formatMoney(result.scheduledPayment)}
-                  hint={`${FREQUENCY_META[result.input.frequency].label} · ${result.totalPeriods} periods. Last installment absorbs leftover cents.`}
+                  hint={
+                    result.input.amortizationMethod === "equal-principal"
+                      ? `${FREQUENCY_META[result.input.frequency].label} principal reduction. The installment declines as interest falls; the last period absorbs leftover cents.`
+                      : `${FREQUENCY_META[result.input.frequency].label} · ${result.totalPeriods} periods. Last installment absorbs leftover cents.`
+                  }
                 />
                 <SummaryCard
                   label="Total paid"
@@ -150,7 +160,11 @@ export function LoanCalculator() {
                     <CardTitle>Grace treatment comparison</CardTitle>
                     <CardDescription>
                       Same loan, three ways to handle interest during the{" "}
-                      {result.input.graceMonths}-month grace period.
+                      {result.input.graceMonths}-month grace period, using{" "}
+                      {AMORTIZATION_META[
+                        result.input.amortizationMethod
+                      ].label.toLowerCase()}{" "}
+                      amortization.
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="grid gap-3 md:grid-cols-3">
@@ -187,7 +201,10 @@ export function LoanCalculator() {
                           <dl className="mt-3 grid gap-1 text-sm">
                             <div className="flex justify-between gap-3">
                               <dt className="text-muted-foreground">
-                                Level payment
+                                {result.input.amortizationMethod ===
+                                "equal-principal"
+                                  ? "Principal each period"
+                                  : "Level payment"}
                               </dt>
                               <dd className="tabular-nums">
                                 {formatMoney(row.scheduledPayment)}
@@ -227,14 +244,18 @@ export function LoanCalculator() {
                 <CardHeader>
                   <CardTitle>Amortization schedule</CardTitle>
                   <CardDescription>
-                    Accrual matches payment frequency. During repaid periods,
-                    interest is calculated on the current principal. The final
-                    payment clears remaining principal
+                    {result.input.amortizationMethod === "equal-principal"
+                      ? "Each repayment period reduces principal by the same amount. Interest is charged on the current principal, so the installment declines."
+                      : "The installment stays level. Interest is charged on the current principal, and the rest of the installment reduces principal."}{" "}
                     {result.showAccrued
-                      ? " and any leftover accrued interest"
-                      : ""}
-                    . IRR is annualized to date on the same compounding basis
-                    as the loan rate (disbursement at start, then each
+                      ? result.input.amortizationMethod === "equal-principal"
+                        ? "Accrued grace interest is paid in equal slices alongside principal."
+                        : "A level payment covers current interest, then accrued grace interest, then principal."
+                      : null}{" "}
+                    The final payment clears remaining principal
+                    {result.showAccrued ? " and any leftover accrued interest" : ""}.
+                    IRR is annualized to date on the same compounding basis as
+                    the loan rate (disbursement at start, then each
                     period&apos;s payment). Grace periods with a $0 payment
                     show an em dash until cash starts coming back.
                   </CardDescription>
@@ -250,9 +271,10 @@ export function LoanCalculator() {
 
       <Separator />
       <p className="max-w-3xl text-xs leading-5 text-muted-foreground">
-        Assumptions: fixed rate, fully amortizing after grace, no balloon,
-        payments in arrears, and no late-pay (days-after-due) grace. This is a
-        calculator, not lending, tax, or legal advice.
+        Assumptions: fixed rate, fully amortizing after grace by level payment
+        or equal principal, no balloon, payments in arrears, and no late-pay
+        (days-after-due) grace. This is a calculator, not lending, tax, or
+        legal advice.
       </p>
     </div>
   );

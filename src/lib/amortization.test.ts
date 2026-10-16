@@ -18,6 +18,7 @@ const baseInput: LoanInput = {
   startDate: "2026-01-15",
   graceMonths: 0,
   treatment: "subsidized",
+  amortizationMethod: "level",
 };
 
 describe("payment frequency", () => {
@@ -181,6 +182,7 @@ describe("grace treatments", () => {
       startDate: "2026-01-15",
       graceMonths: 48,
       treatment: "accrue",
+      amortizationMethod: "level",
     });
     const last = result.rows.at(-1);
     assert.ok(last);
@@ -188,6 +190,128 @@ describe("grace treatments", () => {
     assert.ok(last.payment > result.scheduledPayment);
     assert.equal(last.accruedBalance, 0);
     assert.equal(last.principalBalance, 0);
+  });
+});
+
+describe("equal principal", () => {
+  const annual: LoanInput = {
+    principal: 20,
+    annualRatePercent: 10,
+    termYears: 5,
+    frequency: "annual",
+    startDate: "2026-01-15",
+    graceMonths: 0,
+    treatment: "subsidized",
+    amortizationMethod: "equal-principal",
+  };
+
+  it("repays the same principal each year and lets the installment fall", () => {
+    const result = buildSchedule(annual);
+    assert.equal(result.scheduledPayment, 4);
+    assert.deepEqual(
+      result.rows.map((row) => ({
+        payment: row.payment,
+        interest: row.interest,
+        principal: row.principal,
+        principalBalance: row.principalBalance,
+      })),
+      [
+        { payment: 6, interest: 2, principal: 4, principalBalance: 16 },
+        { payment: 5.6, interest: 1.6, principal: 4, principalBalance: 12 },
+        { payment: 5.2, interest: 1.2, principal: 4, principalBalance: 8 },
+        { payment: 4.8, interest: 0.8, principal: 4, principalBalance: 4 },
+        { payment: 4.4, interest: 0.4, principal: 4, principalBalance: 0 },
+      ],
+    );
+    assert.equal(result.totals.principal, 20);
+    assert.equal(result.totals.interest, 6);
+
+    const level = buildSchedule({ ...annual, amortizationMethod: "level" });
+    assert.ok(result.totals.interest < level.totals.interest);
+  });
+
+  it("puts the leftover cent of principal on the last period", () => {
+    const result = buildSchedule({
+      ...annual,
+      principal: 100,
+      annualRatePercent: 0,
+      termYears: 3,
+    });
+    assert.deepEqual(
+      result.rows.map((row) => row.principal),
+      [33.33, 33.33, 33.34],
+    );
+    assert.equal(result.rows.at(-1)?.principalBalance, 0);
+    assert.equal(result.totals.principal, 100);
+  });
+
+  it("amortizes capitalized, accrued, and subsidized grace on an equal-principal schedule", () => {
+    const withGrace: LoanInput = {
+      principal: 100,
+      annualRatePercent: 10,
+      termYears: 3,
+      frequency: "annual",
+      startDate: "2026-01-15",
+      graceMonths: 12,
+      treatment: "capitalize",
+      amortizationMethod: "equal-principal",
+    };
+
+    const capitalized = buildSchedule(withGrace);
+    assert.equal(capitalized.scheduledPayment, 55);
+    assert.equal(capitalized.rows[0]?.capitalized, 10);
+    assert.deepEqual(
+      capitalized.rows.slice(1).map((row) => ({
+        payment: row.payment,
+        interest: row.interest,
+        principal: row.principal,
+        principalBalance: row.principalBalance,
+      })),
+      [
+        { payment: 66, interest: 11, principal: 55, principalBalance: 55 },
+        { payment: 60.5, interest: 5.5, principal: 55, principalBalance: 0 },
+      ],
+    );
+
+    const accrued = buildSchedule({ ...withGrace, treatment: "accrue" });
+    assert.equal(accrued.scheduledPayment, 50);
+    assert.equal(accrued.rows[0]?.accruedBalance, 10);
+    assert.deepEqual(
+      accrued.rows.slice(1).map((row) => ({
+        payment: row.payment,
+        interest: row.interest,
+        principal: row.principal,
+        accruedApplied: row.accruedApplied,
+        accruedBalance: row.accruedBalance,
+        principalBalance: row.principalBalance,
+      })),
+      [
+        {
+          payment: 65,
+          interest: 10,
+          principal: 50,
+          accruedApplied: 5,
+          accruedBalance: 5,
+          principalBalance: 50,
+        },
+        {
+          payment: 60,
+          interest: 5,
+          principal: 50,
+          accruedApplied: 5,
+          accruedBalance: 0,
+          principalBalance: 0,
+        },
+      ],
+    );
+
+    const subsidized = buildSchedule({ ...withGrace, treatment: "subsidized" });
+    assert.equal(subsidized.rows[0]?.interest, 0);
+    assert.deepEqual(
+      subsidized.rows.slice(1).map((row) => row.payment),
+      [60, 55],
+    );
+    assert.equal(subsidized.rows.at(-1)?.principalBalance, 0);
   });
 });
 
@@ -201,6 +325,7 @@ describe("parseLoanForm", () => {
       startDate: "2026-01-01",
       graceMonths: "0",
       treatment: "capitalize",
+      amortizationMethod: "level",
     });
     assert.equal(parsed.ok, true);
   });
@@ -214,6 +339,7 @@ describe("parseLoanForm", () => {
       startDate: "2026-01-01",
       graceMonths: "12",
       treatment: "capitalize",
+      amortizationMethod: "level",
     });
     assert.equal(parsed.ok, true);
     if (parsed.ok) {
@@ -230,6 +356,7 @@ describe("parseLoanForm", () => {
       startDate: "",
       graceMonths: "",
       treatment: "capitalize",
+      amortizationMethod: "level",
     });
     assert.equal(empty.ok, false);
     if (!empty.ok) {
@@ -245,6 +372,7 @@ describe("parseLoanForm", () => {
       startDate: "2026-13-40",
       graceMonths: "1.5",
       treatment: "accrue",
+      amortizationMethod: "level",
     });
     assert.equal(invalid.ok, false);
     if (!invalid.ok) {
@@ -266,6 +394,7 @@ describe("parseLoanForm", () => {
       startDate: "2026-01-01",
       graceMonths: "12",
       treatment: "capitalize",
+      amortizationMethod: "level",
     });
     assert.equal(parsed.ok, false);
     if (!parsed.ok) {

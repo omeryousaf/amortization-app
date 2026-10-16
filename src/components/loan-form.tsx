@@ -4,8 +4,10 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  AMORTIZATION_META,
   FREQUENCY_META,
   TREATMENT_META,
+  type AmortizationMethod,
   type FieldErrors,
   type FormValues,
   type GraceTreatment,
@@ -15,6 +17,12 @@ import { cn } from "@/lib/utils";
 
 const FREQUENCIES = Object.keys(FREQUENCY_META) as PaymentFrequency[];
 const TREATMENTS = Object.keys(TREATMENT_META) as GraceTreatment[];
+const AMORTIZATION_METHODS = Object.keys(
+  AMORTIZATION_META,
+) as AmortizationMethod[];
+
+const selectClassName =
+  "h-8 w-full min-w-0 rounded-lg border border-input bg-transparent px-2.5 py-1 text-base outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-invalid:border-destructive md:text-sm";
 
 interface LoanFormProps {
   values: FormValues;
@@ -42,6 +50,7 @@ export function LoanForm({
   onChange,
 }: LoanFormProps) {
   const showGraceTreatments = enteredGraceMonths(values.graceMonths) > 0;
+
   return (
     <form
       className="grid gap-4"
@@ -98,7 +107,7 @@ export function LoanForm({
             onChange={(event) =>
               onChange({ frequency: event.target.value as PaymentFrequency })
             }
-            className="h-8 w-full min-w-0 rounded-lg border border-input bg-transparent px-2.5 py-1 text-base outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-invalid:border-destructive md:text-sm"
+            className={selectClassName}
           >
             {FREQUENCIES.map((frequency) => (
               <option key={frequency} value={frequency}>
@@ -124,6 +133,31 @@ export function LoanForm({
             one frequency later.
           </p>
           <FieldError message={errors.startDate} />
+        </div>
+
+        <div className="grid gap-1.5 sm:col-span-2">
+          <Label htmlFor="amortizationMethod">Amortization method</Label>
+          <select
+            id="amortizationMethod"
+            value={values.amortizationMethod}
+            aria-invalid={Boolean(errors.amortizationMethod)}
+            onChange={(event) =>
+              onChange({
+                amortizationMethod: event.target.value as AmortizationMethod,
+              })
+            }
+            className={selectClassName}
+          >
+            {AMORTIZATION_METHODS.map((method) => (
+              <option key={method} value={method}>
+                {AMORTIZATION_META[method].label}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-muted-foreground">
+            {AMORTIZATION_META[values.amortizationMethod].summary}
+          </p>
+          <FieldError message={errors.amortizationMethod} />
         </div>
 
         <div className="grid gap-1.5 sm:col-span-2">

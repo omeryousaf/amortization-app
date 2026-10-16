@@ -7,6 +7,8 @@ export type PaymentFrequency =
 
 export type GraceTreatment = "capitalize" | "accrue" | "subsidized";
 
+export type AmortizationMethod = "level" | "equal-principal";
+
 export const FREQUENCY_META: Record<
   PaymentFrequency,
   { label: string; periodsPerYear: number; hint: string }
@@ -50,12 +52,28 @@ export const TREATMENT_META: Record<
   accrue: {
     label: "Accrue separately",
     summary:
-      "Principal does not change during grace. Interest collects in a non-interest-bearing bucket. After grace, interest is charged only on principal. Each payment covers current interest, then the accrued bucket, then principal. The last payment absorbs any leftover accrued interest.",
+      "Principal does not change during grace. Interest collects in a non-interest-bearing bucket. After grace, interest is charged only on principal, and the accrued bucket is repaid over the remaining term. The last payment absorbs any leftover accrued interest.",
   },
   subsidized: {
     label: "Lender-subsidized",
     summary:
       "No borrower interest during grace. After grace, the original principal is amortized over the remaining term.",
+  },
+};
+
+export const AMORTIZATION_META: Record<
+  AmortizationMethod,
+  { label: string; summary: string }
+> = {
+  level: {
+    label: "Level payment",
+    summary:
+      "The installment stays the same. Interest falls and the principal portion rises as the balance declines.",
+  },
+  "equal-principal": {
+    label: "Equal principal",
+    summary:
+      "Each repayment period reduces principal by the same amount. The installment falls because interest is charged on a smaller balance.",
   },
 };
 
@@ -67,6 +85,7 @@ export interface LoanInput {
   startDate: string;
   graceMonths: number;
   treatment: GraceTreatment;
+  amortizationMethod: AmortizationMethod;
 }
 
 export interface ScheduleRow {
@@ -124,7 +143,8 @@ export type FieldKey =
   | "frequency"
   | "startDate"
   | "graceMonths"
-  | "treatment";
+  | "treatment"
+  | "amortizationMethod";
 
 export type FieldErrors = Partial<Record<FieldKey, string>>;
 
@@ -227,6 +247,12 @@ export function scheduledPayment(
   return roundCents((principal * (periodicRate * factor)) / (factor - 1));
 }
 
+/** Equal cent-rounded slice of an amount. The last period keeps the remainder. */
+export function equalInstallment(amount: number, n: number): number {
+  if (n <= 0) return 0;
+  return roundCents(amount / n);
+}
+
 function parseISODate(iso: string): Date | null {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso.trim());
   if (!match) return null;
@@ -318,6 +344,7 @@ export interface FormValues {
   startDate: string;
   graceMonths: string;
   treatment: GraceTreatment;
+  amortizationMethod: AmortizationMethod;
 }
 
 export function parseLoanForm(values: FormValues): ParseSuccess | ParseFailure {
@@ -349,6 +376,10 @@ export function parseLoanForm(values: FormValues): ParseSuccess | ParseFailure {
 
   if (!(values.frequency in FREQUENCY_META)) {
     errors.frequency = "Choose a payment frequency.";
+  }
+
+  if (!(values.amortizationMethod in AMORTIZATION_META)) {
+    errors.amortizationMethod = "Choose how principal is repaid.";
   }
 
   if (isEmpty(values.startDate)) {
@@ -412,6 +443,7 @@ export function parseLoanForm(values: FormValues): ParseSuccess | ParseFailure {
       startDate: values.startDate,
       graceMonths,
       treatment: graceMonths > 0 ? values.treatment : "subsidized",
+      amortizationMethod: values.amortizationMethod,
     },
   };
 }
@@ -484,11 +516,48 @@ export function buildSchedule(input: LoanInput): ScheduleResult {
     periodicRate,
     repaymentPeriods,
   );
+  const equalPrincipal = input.amortizationMethod === "equal-principal";
+  const principalSlice = equalInstallment(amortizePrincipal, repaymentPeriods);
+  const accruedSlice =
+    input.treatment === "accrue"
+      ? equalInstallment(accruedBalance, repaymentPeriods)
+      : 0;
 
   for (let i = 0; i < repaymentPeriods; i += 1) {
     const period = gracePeriods + i + 1;
     const isLast = i === repaymentPeriods - 1;
     const currentInterest = roundCents(principalBalance * periodicRate);
+
+    if (equalPrincipal) {
+      const principalPay = isLast
+        ? principalBalance
+        : roundCents(Math.min(principalSlice, principalBalance));
+      const accruedApplied =
+        input.treatment === "accrue"
+          ? isLast
+            ? accruedBalance
+            : roundCents(Math.min(accruedSlice, accruedBalance))
+          : 0;
+      const payment = roundCents(
+        currentInterest + accruedApplied + principalPay,
+      );
+      principalBalance = roundCents(principalBalance - principalPay);
+      accruedBalance = roundCents(accruedBalance - accruedApplied);
+      rows.push({
+        period,
+        date: periodDate(origination, period, input.frequency),
+        phase: "repayment",
+        payment,
+        interest: currentInterest,
+        principal: principalPay,
+        accruedApplied,
+        accruedBalance,
+        principalBalance,
+        capitalized: 0,
+        irrAnnualPercent: null,
+      });
+      continue;
+    }
 
     if (input.treatment === "accrue") {
       if (isLast) {
@@ -623,7 +692,7 @@ export function buildSchedule(input: LoanInput): ScheduleResult {
     totalPeriods,
     gracePeriods,
     repaymentPeriods,
-    scheduledPayment: levelPayment,
+    scheduledPayment: equalPrincipal ? principalSlice : levelPayment,
     rows,
     totals,
     irrAnnualPercent: rows.at(-1)?.irrAnnualPercent ?? null,
