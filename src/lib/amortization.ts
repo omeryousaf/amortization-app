@@ -7,7 +7,32 @@ export type PaymentFrequency =
 
 export type GraceTreatment = "capitalize" | "accrue" | "subsidized";
 
-export type AmortizationMethod = "level" | "equal-principal";
+export type AmortizationMethod = "level" | "equal-principal" | "scheduled";
+
+/** A range value is currency, or a percent of the principal being repaid. */
+export type PrincipalUnit = "amount" | "percent";
+
+/** Repayment-period numbers are 1-based and ignore grace periods. */
+export interface PrincipalRange {
+  from: number;
+  to: number;
+  /** Currency amount, or a percent of amortizing principal when unit is "percent". */
+  amount: number;
+  /** Omitted means a currency amount. */
+  unit?: PrincipalUnit;
+}
+
+export interface PrincipalRangeForm {
+  id: string;
+  from: string;
+  to: string;
+  amount: string;
+  /** Omitted means a currency amount. */
+  unit?: PrincipalUnit;
+}
+
+/** Short schedules can be edited from the table as well as the range list. */
+export const EDITABLE_PRINCIPAL_PERIOD_LIMIT = 24;
 
 export const FREQUENCY_META: Record<
   PaymentFrequency,
@@ -75,6 +100,11 @@ export const AMORTIZATION_META: Record<
     summary:
       "Each repayment period reduces principal by the same amount. The installment falls because interest is charged on a smaller balance.",
   },
+  scheduled: {
+    label: "Scheduled principal",
+    summary:
+      "You choose how much principal each repayment period reduces, as an amount or as a percent of principal. Interest is added on top. Periods you leave out share whatever principal is left.",
+  },
 };
 
 export interface LoanInput {
@@ -86,6 +116,8 @@ export interface LoanInput {
   graceMonths: number;
   treatment: GraceTreatment;
   amortizationMethod: AmortizationMethod;
+  /** Used when amortizationMethod is "scheduled". Empty means split the balance equally. */
+  principalRanges?: PrincipalRange[];
 }
 
 export interface ScheduleRow {
@@ -125,6 +157,19 @@ export interface ScheduleResult {
   irrAnnualPercent: number | null;
   showAccrued: boolean;
   showCapitalized: boolean;
+  /** Principal balance that repayment amortizes. Includes capitalized grace interest. */
+  amortizingPrincipal: number;
+  /** Resolved scheduled-principal plan, or null for the other methods. */
+  principalPlan: PrincipalPlan | null;
+  /** Sum and per-period problems for a scheduled-principal loan. The schedule is still built. */
+  warnings: string[];
+}
+
+export interface PrincipalPlan {
+  amounts: number[];
+  explicitSum: number;
+  uncoveredCount: number;
+  target: number;
 }
 
 export interface ComparisonRow {
@@ -144,19 +189,22 @@ export type FieldKey =
   | "startDate"
   | "graceMonths"
   | "treatment"
-  | "amortizationMethod";
+  | "amortizationMethod"
+  | "principalRanges";
 
 export type FieldErrors = Partial<Record<FieldKey, string>>;
 
 export interface ParseSuccess {
   ok: true;
   input: LoanInput;
+  rangeErrors: string[];
 }
 
 export interface ParseFailure {
   ok: false;
   errors: FieldErrors;
   empty: boolean;
+  rangeErrors: string[];
 }
 
 export function roundCents(value: number): number {
@@ -253,6 +301,156 @@ export function equalInstallment(amount: number, n: number): number {
   return roundCents(amount / n);
 }
 
+/** Split an amount across n periods. Earlier periods get the rounded slice; the last keeps the rest. */
+export function distributeAmount(amount: number, n: number): number[] {
+  if (n <= 0) return [];
+  const slice = equalInstallment(amount, n);
+  const amounts: number[] = [];
+  let remaining = roundCents(amount);
+  for (let i = 0; i < n - 1; i += 1) {
+    const pay = roundCents(Math.min(slice, Math.max(remaining, 0)));
+    amounts.push(pay);
+    remaining = roundCents(remaining - pay);
+  }
+  amounts.push(roundCents(Math.max(remaining, 0)));
+  return amounts;
+}
+
+function moneyText(value: number): string {
+  return roundCents(value).toFixed(2);
+}
+
+/**
+ * Currency principal one period of a range reduces.
+ * A percent is that share of `target` (the principal being repaid).
+ */
+export function principalEachPeriod(
+  range: Pick<PrincipalRange, "amount" | "unit">,
+  target: number,
+): number {
+  if (range.unit === "percent") {
+    return roundCents((target * range.amount) / 100);
+  }
+  return roundCents(range.amount);
+}
+
+/** Percent of `target` that `amount` represents, to six decimal places. */
+export function shareOfPrincipal(amount: number, target: number): number {
+  if (target <= 0) return 0;
+  return Math.round((amount / target) * 100 * 1e6) / 1e6;
+}
+
+export function formatPrincipalShare(share: number): string {
+  if (!Number.isFinite(share)) return "";
+  return String(Math.round((share + Number.EPSILON) * 1e6) / 1e6);
+}
+
+/** Rewrite a range entry when the principal column changes between $ and %. */
+export function convertPrincipalInput(
+  amount: string,
+  from: PrincipalUnit,
+  to: PrincipalUnit,
+  target: number,
+): string {
+  if (from === to) return amount;
+  const parsed = Number(amount);
+  if (amount.trim() === "" || !Number.isFinite(parsed)) return amount;
+  if (to === "percent") {
+    const dollars = principalEachPeriod({ amount: parsed, unit: from }, target);
+    return formatPrincipalShare(shareOfPrincipal(dollars, target));
+  }
+  return String(principalEachPeriod({ amount: parsed, unit: from }, target));
+}
+
+/**
+ * Text shown in one scheduled-principal cell.
+ * A range that already uses `unit` keeps its raw text, so a half-typed percent
+ * is not replaced by the dollar amount it converts to.
+ */
+export function principalCellDraft(
+  ranges: PrincipalRangeForm[],
+  repaymentPeriod: number,
+  plannedAmount: number,
+  unit: PrincipalUnit,
+  target: number,
+): string {
+  let winner: PrincipalRangeForm | null = null;
+  for (const range of ranges) {
+    const from = Number(range.from);
+    const to = Number(range.to);
+    if (
+      Number.isInteger(from) &&
+      Number.isInteger(to) &&
+      from <= repaymentPeriod &&
+      repaymentPeriod <= to
+    ) {
+      winner = range;
+    }
+  }
+  const winnerUnit: PrincipalUnit =
+    winner?.unit === "percent" ? "percent" : "amount";
+  if (winner && winnerUnit === unit) return winner.amount;
+  if (unit === "percent") {
+    return formatPrincipalShare(shareOfPrincipal(plannedAmount, target));
+  }
+  return String(plannedAmount);
+}
+
+/**
+ * Turn ordered principal ranges into one amount per repayment period.
+ * Later ranges replace earlier ones. A percent is a share of `target`,
+ * applied each period the range covers. Periods no range covers share
+ * whatever principal the explicit ranges did not claim, when that remainder
+ * is positive.
+ */
+export function planPrincipalSchedule(
+  ranges: PrincipalRange[],
+  periods: number,
+  target: number,
+): PrincipalPlan {
+  const assigned: Array<number | null> = Array.from(
+    { length: periods },
+    () => null,
+  );
+
+  for (const range of ranges) {
+    const from = Math.max(1, range.from);
+    const to = Math.min(periods, range.to);
+    const each = principalEachPeriod(range, target);
+    for (let period = from; period <= to; period += 1) {
+      assigned[period - 1] = each;
+    }
+  }
+
+  let explicitSum = 0;
+  const uncovered: number[] = [];
+  for (let index = 0; index < assigned.length; index += 1) {
+    const amount = assigned[index];
+    if (amount === null) {
+      uncovered.push(index);
+    } else {
+      explicitSum = roundCents(explicitSum + amount);
+    }
+  }
+
+  const remainder = roundCents(target - explicitSum);
+  if (uncovered.length > 0 && remainder > 0) {
+    const slices = distributeAmount(remainder, uncovered.length);
+    uncovered.forEach((index, sliceIndex) => {
+      assigned[index] = slices[sliceIndex] ?? 0;
+    });
+  } else {
+    for (const index of uncovered) assigned[index] = 0;
+  }
+
+  return {
+    amounts: assigned.map((amount) => amount ?? 0),
+    explicitSum,
+    uncoveredCount: uncovered.length,
+    target: roundCents(target),
+  };
+}
+
 function parseISODate(iso: string): Date | null {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso.trim());
   if (!match) return null;
@@ -345,6 +543,9 @@ export interface FormValues {
   graceMonths: string;
   treatment: GraceTreatment;
   amortizationMethod: AmortizationMethod;
+  principalRanges?: PrincipalRangeForm[];
+  /** Unit for the scheduled-principal column. Omitted means a currency amount. */
+  principalUnit?: PrincipalUnit;
 }
 
 export function parseLoanForm(values: FormValues): ParseSuccess | ParseFailure {
@@ -429,12 +630,26 @@ export function parseLoanForm(values: FormValues): ParseSuccess | ParseFailure {
     }
   }
 
+  const repaymentPeriods =
+    principal !== null &&
+    termYears !== null &&
+    !errors.graceMonths &&
+    !errors.frequency
+      ? Math.round(termYears * periodsPerYear(frequency)) -
+        gracePeriodCount(graceMonths, frequency)
+      : null;
+  const { ranges: principalRanges, rangeErrors } = parsePrincipalRanges(
+    values.amortizationMethod === "scheduled" ? values.principalRanges : [],
+    repaymentPeriods,
+  );
+
   if (Object.keys(errors).length > 0) {
-    return { ok: false, errors, empty };
+    return { ok: false, errors, empty, rangeErrors };
   }
 
   return {
     ok: true,
+    rangeErrors,
     input: {
       principal: principal as number,
       annualRatePercent: annualRatePercent as number,
@@ -444,8 +659,59 @@ export function parseLoanForm(values: FormValues): ParseSuccess | ParseFailure {
       graceMonths,
       treatment: graceMonths > 0 ? values.treatment : "subsidized",
       amortizationMethod: values.amortizationMethod,
+      principalRanges,
     },
   };
+}
+
+function parsePrincipalRanges(
+  ranges: PrincipalRangeForm[] | undefined,
+  repaymentPeriods: number | null,
+): { ranges: PrincipalRange[]; rangeErrors: string[] } {
+  const parsed: PrincipalRange[] = [];
+  const rangeErrors: string[] = [];
+  for (const [index, range] of (ranges ?? []).entries()) {
+    const label = `Range ${index + 1}`;
+    const from = parsePeriodNumber(range.from);
+    const to = parsePeriodNumber(range.to);
+    const amount = parseNonNegativeNumber(range.amount);
+    if (from === null || to === null) {
+      rangeErrors.push(`${label} needs a whole repayment period number.`);
+      continue;
+    }
+    if (from > to) {
+      rangeErrors.push(`${label} ends before it starts.`);
+      continue;
+    }
+    if (
+      repaymentPeriods !== null &&
+      (from > repaymentPeriods || to > repaymentPeriods)
+    ) {
+      rangeErrors.push(
+        `${label} must stay within repayment periods 1 to ${repaymentPeriods}.`,
+      );
+      continue;
+    }
+    const unit = range.unit === "percent" ? "percent" : "amount";
+    if (range.amount.trim() === "" || amount === null) {
+      rangeErrors.push(
+        unit === "percent"
+          ? `${label} needs a principal percent of zero or more.`
+          : `${label} needs a principal amount of zero or more.`,
+      );
+      continue;
+    }
+    parsed.push(unit === "percent" ? { from, to, amount, unit } : { from, to, amount });
+  }
+  return { ranges: parsed, rangeErrors };
+}
+
+function parsePeriodNumber(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const n = Number(trimmed);
+  if (!Number.isInteger(n) || n < 1) return null;
+  return n;
 }
 
 function periodDate(
@@ -517,21 +783,43 @@ export function buildSchedule(input: LoanInput): ScheduleResult {
     repaymentPeriods,
   );
   const equalPrincipal = input.amortizationMethod === "equal-principal";
+  const scheduledPrincipal = input.amortizationMethod === "scheduled";
   const principalSlice = equalInstallment(amortizePrincipal, repaymentPeriods);
+  const principalPlan = scheduledPrincipal
+    ? planPrincipalSchedule(
+        input.principalRanges ?? [],
+        repaymentPeriods,
+        amortizePrincipal,
+      )
+    : null;
+  const principalAmounts =
+    scheduledPrincipal && principalPlan
+      ? principalPlan.amounts
+      : equalPrincipal
+        ? distributeAmount(amortizePrincipal, repaymentPeriods)
+        : null;
   const accruedSlice =
     input.treatment === "accrue"
       ? equalInstallment(accruedBalance, repaymentPeriods)
       : 0;
+  const warnings: string[] = [];
 
   for (let i = 0; i < repaymentPeriods; i += 1) {
     const period = gracePeriods + i + 1;
     const isLast = i === repaymentPeriods - 1;
     const currentInterest = roundCents(principalBalance * periodicRate);
 
-    if (equalPrincipal) {
-      const principalPay = isLast
-        ? principalBalance
-        : roundCents(Math.min(principalSlice, principalBalance));
+    if (principalAmounts) {
+      const requested = principalAmounts[i] ?? 0;
+      const principalPay = roundCents(Math.min(requested, principalBalance));
+      if (
+        scheduledPrincipal &&
+        roundCents(requested - principalPay) >= 0.01
+      ) {
+        warnings.push(
+          `Repayment period ${i + 1} schedules ${moneyText(requested)} of principal, and ${moneyText(principalBalance)} is left.`,
+        );
+      }
       const accruedApplied =
         input.treatment === "accrue"
           ? isLast
@@ -659,6 +947,12 @@ export function buildSchedule(input: LoanInput): ScheduleResult {
     });
   }
 
+  if (scheduledPrincipal && principalBalance >= 0.01) {
+    warnings.push(
+      `${moneyText(principalBalance)} of principal is still unpaid after the last repayment period.`,
+    );
+  }
+
   const totals = rows.reduce<ScheduleTotals>(
     (acc, row) => ({
       paid: roundCents(acc.paid + row.payment),
@@ -692,12 +986,19 @@ export function buildSchedule(input: LoanInput): ScheduleResult {
     totalPeriods,
     gracePeriods,
     repaymentPeriods,
-    scheduledPayment: equalPrincipal ? principalSlice : levelPayment,
+    scheduledPayment: scheduledPrincipal
+      ? (rows.find((row) => row.phase === "repayment")?.payment ?? 0)
+      : equalPrincipal
+        ? principalSlice
+        : levelPayment,
     rows,
     totals,
     irrAnnualPercent: rows.at(-1)?.irrAnnualPercent ?? null,
     showAccrued: input.treatment === "accrue" && gracePeriods > 0,
     showCapitalized: input.treatment === "capitalize" && gracePeriods > 0,
+    amortizingPrincipal: amortizePrincipal,
+    principalPlan,
+    warnings,
   };
 }
 

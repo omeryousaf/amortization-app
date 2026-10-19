@@ -17,23 +17,30 @@ import {
   AMORTIZATION_META,
   buildSchedule,
   compareTreatments,
+  EDITABLE_PRINCIPAL_PERIOD_LIMIT,
   FREQUENCY_META,
+  convertPrincipalInput,
   parseLoanForm,
+  principalCellDraft,
   TREATMENT_META,
   type FormValues,
+  type PrincipalRangeForm,
+  type PrincipalUnit,
 } from "@/lib/amortization";
 import { formatDate, formatIrr, formatMoney } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const defaultValues: FormValues = {
-  principal: "250000",
-  annualRatePercent: "6.5",
-  termYears: "30",
-  frequency: "monthly",
+  principal: "20",
+  annualRatePercent: "10",
+  termYears: "5",
+  frequency: "annual",
   startDate: "2026-01-01",
   graceMonths: "0",
   treatment: "capitalize",
   amortizationMethod: "level",
+  principalRanges: [],
+  principalUnit: "amount",
 };
 
 export function LoanCalculator() {
@@ -57,8 +64,9 @@ export function LoanCalculator() {
           Loan amortization
         </h1>
         <p className="max-w-2xl text-sm leading-6 text-muted-foreground sm:text-base">
-          Build a fully amortizing schedule with a level installment or equal
-          principal repayments. When a grace period is included, compare
+          Build a fully amortizing schedule with a level installment, equal
+          principal, or a principal schedule you set. When a grace period is
+          included, compare
           capitalizing interest, holding it in a separate accrued bucket, or
           having the lender subsidize it.
         </p>
@@ -77,6 +85,10 @@ export function LoanCalculator() {
             <LoanForm
               values={values}
               errors={parsed.ok ? {} : parsed.empty ? {} : parsed.errors}
+              rangeErrors={parsed.rangeErrors}
+              warnings={result?.warnings ?? []}
+              principalPlan={result?.principalPlan ?? null}
+              includesCapitalizedInterest={result?.showCapitalized ?? false}
               onChange={(patch) => {
                 setValues((current) => ({ ...current, ...patch }));
               }}
@@ -111,15 +123,19 @@ export function LoanCalculator() {
               <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
                 <SummaryCard
                   label={
-                    result.input.amortizationMethod === "equal-principal"
-                      ? "Principal each period"
-                      : "Level payment"
+                    result.input.amortizationMethod === "scheduled"
+                      ? "First installment"
+                      : result.input.amortizationMethod === "equal-principal"
+                        ? "Principal each period"
+                        : "Level payment"
                   }
                   value={formatMoney(result.scheduledPayment)}
                   hint={
-                    result.input.amortizationMethod === "equal-principal"
-                      ? `${FREQUENCY_META[result.input.frequency].label} principal reduction. The installment declines as interest falls; the last period absorbs leftover cents.`
-                      : `${FREQUENCY_META[result.input.frequency].label} · ${result.totalPeriods} periods. Last installment absorbs leftover cents.`
+                    result.input.amortizationMethod === "scheduled"
+                      ? "Interest plus the principal scheduled for the first repayment period. Later installments change as both change."
+                      : result.input.amortizationMethod === "equal-principal"
+                        ? `${FREQUENCY_META[result.input.frequency].label} principal reduction. The installment declines as interest falls; the last period absorbs leftover cents.`
+                        : `${FREQUENCY_META[result.input.frequency].label} · ${result.totalPeriods} periods. Last installment absorbs leftover cents.`
                   }
                 />
                 <SummaryCard
@@ -202,9 +218,12 @@ export function LoanCalculator() {
                             <div className="flex justify-between gap-3">
                               <dt className="text-muted-foreground">
                                 {result.input.amortizationMethod ===
-                                "equal-principal"
-                                  ? "Principal each period"
-                                  : "Level payment"}
+                                "scheduled"
+                                  ? "First installment"
+                                  : result.input.amortizationMethod ===
+                                      "equal-principal"
+                                    ? "Principal each period"
+                                    : "Level payment"}
                               </dt>
                               <dd className="tabular-nums">
                                 {formatMoney(row.scheduledPayment)}
@@ -244,13 +263,15 @@ export function LoanCalculator() {
                 <CardHeader>
                   <CardTitle>Amortization schedule</CardTitle>
                   <CardDescription>
-                    {result.input.amortizationMethod === "equal-principal"
-                      ? "Each repayment period reduces principal by the same amount. Interest is charged on the current principal, so the installment declines."
-                      : "The installment stays level. Interest is charged on the current principal, and the rest of the installment reduces principal."}{" "}
+                    {result.input.amortizationMethod === "scheduled"
+                      ? "Each repayment period reduces principal by the amount or percent of principal you scheduled. Interest is charged on the current principal and added to that amount."
+                      : result.input.amortizationMethod === "equal-principal"
+                        ? "Each repayment period reduces principal by the same amount. Interest is charged on the current principal, so the installment declines."
+                        : "The installment stays level. Interest is charged on the current principal, and the rest of the installment reduces principal."}{" "}
                     {result.showAccrued
-                      ? result.input.amortizationMethod === "equal-principal"
-                        ? "Accrued grace interest is paid in equal slices alongside principal."
-                        : "A level payment covers current interest, then accrued grace interest, then principal."
+                      ? result.input.amortizationMethod === "level"
+                        ? "A level payment covers current interest, then accrued grace interest, then principal."
+                        : "Accrued grace interest is paid in equal slices alongside principal."
                       : null}{" "}
                     The final payment clears remaining principal
                     {result.showAccrued ? " and any leftover accrued interest" : ""}.
@@ -261,7 +282,58 @@ export function LoanCalculator() {
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <ScheduleTable result={result} />
+                  <ScheduleTable
+                    result={result}
+                    principalColumn={
+                      result.input.amortizationMethod === "scheduled"
+                        ? {
+                            unit: principalUnit(values.principalUnit),
+                            onUnitChange: (unit) =>
+                              setValues((current) => ({
+                                ...current,
+                                principalUnit: unit,
+                                principalRanges: (
+                                  current.principalRanges ?? []
+                                ).map((range) =>
+                                  convertPrincipalRange(
+                                    range,
+                                    unit,
+                                    result.amortizingPrincipal,
+                                  ),
+                                ),
+                              })),
+                          }
+                        : undefined
+                    }
+                    principalEditor={
+                      result.input.amortizationMethod === "scheduled" &&
+                      result.repaymentPeriods <= EDITABLE_PRINCIPAL_PERIOD_LIMIT
+                        ? {
+                            gracePeriods: result.gracePeriods,
+                            value: (repaymentPeriod, paidPrincipal) =>
+                              principalCellDraft(
+                                values.principalRanges ?? [],
+                                repaymentPeriod,
+                                result.principalPlan?.amounts[
+                                  repaymentPeriod - 1
+                                ] ?? paidPrincipal,
+                                principalUnit(values.principalUnit),
+                                result.amortizingPrincipal,
+                              ),
+                            onChange: (repaymentPeriod, amount) =>
+                              setValues((current) => ({
+                                ...current,
+                                principalRanges: withPeriodAmount(
+                                  current.principalRanges ?? [],
+                                  repaymentPeriod,
+                                  amount,
+                                  principalUnit(current.principalUnit),
+                                ),
+                              })),
+                          }
+                        : undefined
+                    }
+                  />
                 </CardContent>
               </Card>
             </>
@@ -271,13 +343,55 @@ export function LoanCalculator() {
 
       <Separator />
       <p className="max-w-3xl text-xs leading-5 text-muted-foreground">
-        Assumptions: fixed rate, fully amortizing after grace by level payment
-        or equal principal, no balloon, payments in arrears, and no late-pay
-        (days-after-due) grace. This is a calculator, not lending, tax, or
-        legal advice.
+        Assumptions: fixed rate, fully amortizing after grace by level payment,
+        equal principal, or a principal schedule, no balloon, payments in
+        arrears, and no late-pay (days-after-due) grace. This is a calculator,
+        not lending, tax, or legal advice.
       </p>
     </div>
   );
+}
+
+function principalUnit(unit: PrincipalUnit | undefined): PrincipalUnit {
+  return unit === "percent" ? "percent" : "amount";
+}
+
+function convertPrincipalRange(
+  range: PrincipalRangeForm,
+  unit: PrincipalUnit,
+  target: number,
+): PrincipalRangeForm {
+  const from = principalUnit(range.unit);
+  return {
+    ...range,
+    unit,
+    amount: convertPrincipalInput(range.amount, from, unit, target),
+  };
+}
+
+function withPeriodAmount(
+  ranges: PrincipalRangeForm[],
+  repaymentPeriod: number,
+  amount: string,
+  unit: PrincipalUnit,
+): PrincipalRangeForm[] {
+  const period = String(repaymentPeriod);
+  const existing = [...ranges]
+    .reverse()
+    .find(
+      (range) => range.from.trim() === period && range.to.trim() === period,
+    );
+  const kept = ranges.filter((range) => range.id !== existing?.id);
+  return [
+    ...kept,
+    {
+      id: existing?.id ?? crypto.randomUUID(),
+      from: period,
+      to: period,
+      amount,
+      unit,
+    },
+  ];
 }
 
 function SummaryCard({

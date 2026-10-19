@@ -1,5 +1,6 @@
 "use client";
 
+import { PrincipalScheduleEditor } from "@/components/principal-schedule-editor";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -12,6 +13,7 @@ import {
   type FormValues,
   type GraceTreatment,
   type PaymentFrequency,
+  type PrincipalPlan,
 } from "@/lib/amortization";
 import { cn } from "@/lib/utils";
 
@@ -27,6 +29,10 @@ const selectClassName =
 interface LoanFormProps {
   values: FormValues;
   errors: FieldErrors;
+  rangeErrors: string[];
+  warnings: string[];
+  principalPlan: PrincipalPlan | null;
+  includesCapitalizedInterest: boolean;
   onChange: (patch: Partial<FormValues>) => void;
 }
 
@@ -47,6 +53,10 @@ function enteredGraceMonths(value: string): number {
 export function LoanForm({
   values,
   errors,
+  rangeErrors,
+  warnings,
+  principalPlan,
+  includesCapitalizedInterest,
   onChange,
 }: LoanFormProps) {
   const showGraceTreatments = enteredGraceMonths(values.graceMonths) > 0;
@@ -62,7 +72,7 @@ export function LoanForm({
           <Input
             id="principal"
             inputMode="decimal"
-            placeholder="250000"
+            placeholder="20"
             value={values.principal}
             aria-invalid={Boolean(errors.principal)}
             onChange={(event) => onChange({ principal: event.target.value })}
@@ -75,7 +85,7 @@ export function LoanForm({
           <Input
             id="annualRatePercent"
             inputMode="decimal"
-            placeholder="6.5"
+            placeholder="10"
             value={values.annualRatePercent}
             aria-invalid={Boolean(errors.annualRatePercent)}
             onChange={(event) =>
@@ -90,7 +100,7 @@ export function LoanForm({
           <Input
             id="termYears"
             inputMode="decimal"
-            placeholder="30"
+            placeholder="5"
             value={values.termYears}
             aria-invalid={Boolean(errors.termYears)}
             onChange={(event) => onChange({ termYears: event.target.value })}
@@ -232,6 +242,18 @@ export function LoanForm({
           </AlertDescription>
         </Alert>
       )}
+
+      {values.amortizationMethod === "scheduled" ? (
+        <PrincipalScheduleEditor
+          ranges={values.principalRanges ?? []}
+          unit={values.principalUnit === "percent" ? "percent" : "amount"}
+          rangeErrors={rangeErrors}
+          warnings={warnings}
+          plan={principalPlan}
+          includesCapitalizedInterest={includesCapitalizedInterest}
+          onChange={(principalRanges) => onChange({ principalRanges })}
+        />
+      ) : null}
     </form>
   );
 }
