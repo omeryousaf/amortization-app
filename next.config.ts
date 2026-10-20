@@ -9,7 +9,13 @@ const privateLanOrigins = [
   ...Array.from({ length: 16 }, (_, index) => `172.${16 + index}.*.*`),
 ];
 
+// Set by the GitHub Pages workflow. Empty for local dev and `next build`.
+const pagesBasePath = process.env.PAGES_BASE_PATH || undefined;
+
 const nextConfig: NextConfig = {
+  // The calculator is a client-side page, so Pages can serve the exported files.
+  output: "export",
+  ...(pagesBasePath ? { basePath: pagesBasePath } : {}),
   allowedDevOrigins: privateLanOrigins,
   turbopack: {
     rules: {
