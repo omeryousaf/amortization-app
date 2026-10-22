@@ -545,6 +545,114 @@ describe("principal column percent", () => {
   });
 });
 
+describe("tranches", () => {
+  const loan: LoanInput = {
+    principal: 20,
+    annualRatePercent: 10,
+    termYears: 5,
+    frequency: "annual",
+    startDate: "2026-01-01",
+    graceMonths: 0,
+    treatment: "subsidized",
+    amortizationMethod: "level",
+  };
+
+  it("matches a single disbursement when one tranche is drawn on the start date", () => {
+    const single = buildSchedule(loan);
+    const tranched = buildSchedule({
+      ...loan,
+      tranches: [{ date: "2026-01-01", amount: 20 }],
+    });
+    assert.equal(tranched.trancheSchedules?.length, 1);
+    assert.deepEqual(
+      tranched.rows.map((row) => row.payment),
+      single.rows.map((row) => row.payment),
+    );
+    assert.deepEqual(
+      tranched.rows.map((row) => row.interest),
+      single.rows.map((row) => row.interest),
+    );
+    assert.deepEqual(
+      tranched.rows.map((row) => row.principal),
+      single.rows.map((row) => row.principal),
+    );
+    assert.deepEqual(
+      tranched.rows.map((row) => row.principalBalance),
+      single.rows.map((row) => row.principalBalance),
+    );
+    assert.equal(tranched.rows[0]?.drawn, 20);
+    assert.equal(tranched.rows.at(-1)?.principalBalance, 0);
+  });
+
+  it("adds each tranche schedule into the consolidated table", () => {
+    const half = buildSchedule({ ...loan, principal: 10 });
+    const split = buildSchedule({
+      ...loan,
+      tranches: [
+        { date: "2026-01-01", amount: 10 },
+        { date: "2026-01-01", amount: 10 },
+      ],
+    });
+    const [first, second] = split.trancheSchedules ?? [];
+    assert.deepEqual(
+      first?.result.rows.map((row) => row.payment),
+      half.rows.map((row) => row.payment),
+    );
+    assert.deepEqual(
+      split.rows.map((row) => row.payment),
+      half.rows.map((row, index) =>
+        roundCents(row.payment + (second?.result.rows[index]?.payment ?? 0)),
+      ),
+    );
+    assert.equal(split.rows.at(-1)?.principalBalance, 0);
+  });
+
+  it("charges a later tranche only from the period that contains its draw", () => {
+    const staged = buildSchedule({
+      ...loan,
+      tranches: [
+        { date: "2026-01-01", amount: 12 },
+        { date: "2027-01-01", amount: 8 },
+      ],
+    });
+    const later = staged.trancheSchedules?.[1];
+    assert.equal(staged.rows[0]?.interest, 1.2);
+    assert.equal(staged.rows[0]?.drawn, 12);
+    assert.equal(staged.rows[1]?.drawn, 8);
+    assert.equal(later?.firstPeriod, 2);
+    assert.equal(later?.result.rows[0]?.period, 2);
+    assert.equal(later?.result.rows[0]?.interest, 0.8);
+    assert.equal(staged.rows.at(-1)?.principalBalance, 0);
+    assert.equal(later?.result.rows.at(-1)?.principalBalance, 0);
+    assert.deepEqual(staged.warnings, []);
+  });
+
+  it("warns when tranche amounts do not add up to the principal", () => {
+    const staged = buildSchedule({
+      ...loan,
+      tranches: [{ date: "2026-01-01", amount: 12 }],
+    });
+    assert.match(staged.warnings[0] ?? "", /12\.00/);
+    assert.match(staged.warnings[0] ?? "", /20\.00/);
+  });
+
+  it("applies a scheduled percent to each tranche's own principal", () => {
+    const staged = buildSchedule({
+      ...loan,
+      amortizationMethod: "scheduled",
+      principalRanges: [{ from: 1, to: 1, amount: 50, unit: "percent" }],
+      tranches: [
+        { date: "2026-01-01", amount: 10 },
+        { date: "2026-01-01", amount: 10 },
+      ],
+    });
+    assert.equal(staged.trancheSchedules?.[0]?.result.rows[0]?.principal, 5);
+    assert.equal(staged.trancheSchedules?.[1]?.result.rows[0]?.principal, 5);
+    assert.equal(staged.rows[0]?.principal, 10);
+    assert.equal(staged.rows.at(-1)?.principalBalance, 0);
+  });
+});
+
 describe("parseLoanForm", () => {
   it("accepts a complete valid form", () => {
     const parsed = parseLoanForm({
@@ -657,12 +765,39 @@ describe("parseLoanForm", () => {
       ],
     });
     assert.equal(parsed.ok, true);
+    assert.deepEqual(parsed.trancheErrors, []);
     assert.deepEqual(parsed.rangeErrors, [
       "Range 2 needs a principal percent of zero or more.",
     ]);
     if (parsed.ok) {
       assert.deepEqual(parsed.input.principalRanges, [
         { from: 1, to: 2, amount: 10, unit: "percent" },
+      ]);
+    }
+  });
+
+  it("skips a tranche dated on the final payment and keeps the earlier draw", () => {
+    const parsed = parseLoanForm({
+      principal: "20",
+      annualRatePercent: "10",
+      termYears: "5",
+      frequency: "annual",
+      startDate: "2026-01-01",
+      graceMonths: "0",
+      treatment: "subsidized",
+      amortizationMethod: "level",
+      tranches: [
+        { id: "ok", date: "2026-01-01", amount: "12" },
+        { id: "late", date: "2031-01-01", amount: "8" },
+      ],
+    });
+    assert.equal(parsed.ok, true);
+    assert.deepEqual(parsed.trancheErrors, [
+      "Tranche 2 must be on or after the start date and before the final payment.",
+    ]);
+    if (parsed.ok) {
+      assert.deepEqual(parsed.input.tranches, [
+        { date: "2026-01-01", amount: 12 },
       ]);
     }
   });

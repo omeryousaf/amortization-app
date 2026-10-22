@@ -118,6 +118,30 @@ export interface LoanInput {
   amortizationMethod: AmortizationMethod;
   /** Used when amortizationMethod is "scheduled". Empty means split the balance equally. */
   principalRanges?: PrincipalRange[];
+  /**
+   * Draws. Omitted means the full principal is drawn on the start date.
+   * An empty list means the user asked for tranches but none are valid yet.
+   */
+  tranches?: Tranche[];
+}
+
+export interface Tranche {
+  date: string;
+  amount: number;
+}
+
+export interface TrancheForm {
+  id: string;
+  date: string;
+  amount: string;
+}
+
+export interface TrancheSchedule {
+  index: number;
+  date: string;
+  amount: number;
+  firstPeriod: number;
+  result: ScheduleResult;
 }
 
 export interface ScheduleRow {
@@ -127,6 +151,8 @@ export interface ScheduleRow {
   payment: number;
   interest: number;
   principal: number;
+  /** Principal added at the beginning of this period. */
+  drawn: number;
   accruedApplied: number;
   accruedBalance: number;
   principalBalance: number;
@@ -163,6 +189,8 @@ export interface ScheduleResult {
   principalPlan: PrincipalPlan | null;
   /** Sum and per-period problems for a scheduled-principal loan. The schedule is still built. */
   warnings: string[];
+  /** Present on the consolidated result when the loan is drawn in tranches. */
+  trancheSchedules?: TrancheSchedule[];
 }
 
 export interface PrincipalPlan {
@@ -198,6 +226,7 @@ export interface ParseSuccess {
   ok: true;
   input: LoanInput;
   rangeErrors: string[];
+  trancheErrors: string[];
 }
 
 export interface ParseFailure {
@@ -205,6 +234,7 @@ export interface ParseFailure {
   errors: FieldErrors;
   empty: boolean;
   rangeErrors: string[];
+  trancheErrors: string[];
 }
 
 export function roundCents(value: number): number {
@@ -546,6 +576,7 @@ export interface FormValues {
   principalRanges?: PrincipalRangeForm[];
   /** Unit for the scheduled-principal column. Omitted means a currency amount. */
   principalUnit?: PrincipalUnit;
+  tranches?: TrancheForm[];
 }
 
 export function parseLoanForm(values: FormValues): ParseSuccess | ParseFailure {
@@ -642,14 +673,22 @@ export function parseLoanForm(values: FormValues): ParseSuccess | ParseFailure {
     values.amortizationMethod === "scheduled" ? values.principalRanges : [],
     repaymentPeriods,
   );
+  const trancheList = values.tranches ?? [];
+  const { tranches, trancheErrors } = parseTranches(
+    trancheList,
+    values.startDate,
+    termYears,
+    frequency,
+  );
 
   if (Object.keys(errors).length > 0) {
-    return { ok: false, errors, empty, rangeErrors };
+    return { ok: false, errors, empty, rangeErrors, trancheErrors };
   }
 
   return {
     ok: true,
     rangeErrors,
+    trancheErrors,
     input: {
       principal: principal as number,
       annualRatePercent: annualRatePercent as number,
@@ -660,6 +699,7 @@ export function parseLoanForm(values: FormValues): ParseSuccess | ParseFailure {
       treatment: graceMonths > 0 ? values.treatment : "subsidized",
       amortizationMethod: values.amortizationMethod,
       principalRanges,
+      ...(trancheList.length > 0 ? { tranches } : {}),
     },
   };
 }
@@ -706,6 +746,74 @@ function parsePrincipalRanges(
   return { ranges: parsed, rangeErrors };
 }
 
+function parseTranches(
+  tranches: TrancheForm[],
+  startDate: string,
+  termYears: number | null,
+  frequency: PaymentFrequency,
+): { tranches: Tranche[]; trancheErrors: string[] } {
+  const parsed: Tranche[] = [];
+  const trancheErrors: string[] = [];
+  const start = parseISODate(startDate);
+  const totalPeriods =
+    start && termYears !== null && frequency in FREQUENCY_META
+      ? Math.round(termYears * periodsPerYear(frequency))
+      : null;
+
+  for (const [index, tranche] of tranches.entries()) {
+    const label = `Tranche ${index + 1}`;
+    const date = parseISODate(tranche.date);
+    const amount = parsePositiveNumber(tranche.amount);
+    if (!date) {
+      trancheErrors.push(`${label} needs a valid draw date.`);
+      continue;
+    }
+    if (tranche.amount.trim() === "" || amount === null) {
+      trancheErrors.push(`${label} needs a draw amount greater than zero.`);
+      continue;
+    }
+    if (start && totalPeriods !== null) {
+      const firstPeriod = trancheStartPeriod(start, date, frequency, totalPeriods);
+      if (firstPeriod === null) {
+        trancheErrors.push(
+          `${label} must be on or after the start date and before the final payment.`,
+        );
+        continue;
+      }
+    }
+    parsed.push({ date: formatISODate(date), amount });
+  }
+  return { tranches: parsed, trancheErrors };
+}
+
+/** First period a draw is outstanding. A draw on a payment date starts the next period. */
+export function trancheStartPeriod(
+  start: Date,
+  trancheDate: Date,
+  frequency: PaymentFrequency,
+  totalPeriods: number,
+): number | null {
+  if (trancheDate.getTime() < start.getTime()) return null;
+  if (sameDay(trancheDate, start)) return 1;
+  for (let period = 1; period <= totalPeriods; period += 1) {
+    const end = addPeriods(start, period, frequency);
+    if (sameDay(trancheDate, end)) {
+      const next = period + 1;
+      return next <= totalPeriods ? next : null;
+    }
+    if (trancheDate.getTime() < end.getTime()) return period;
+  }
+  return null;
+}
+
+function sameDay(a: Date, b: Date): boolean {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
 function parsePeriodNumber(value: string): number | null {
   const trimmed = value.trim();
   if (!/^\d+$/.test(trimmed)) return null;
@@ -722,7 +830,7 @@ function periodDate(
   return formatISODate(addPeriods(start, period, frequency));
 }
 
-export function buildSchedule(input: LoanInput): ScheduleResult {
+function buildSingleSchedule(input: LoanInput): ScheduleResult {
   const perYear = periodsPerYear(input.frequency);
   const totalPeriods = Math.round(input.termYears * perYear);
   const gracePeriods = gracePeriodCount(input.graceMonths, input.frequency);
@@ -771,6 +879,7 @@ export function buildSchedule(input: LoanInput): ScheduleResult {
       accruedBalance,
       principalBalance,
       capitalized,
+      drawn: 0,
       irrAnnualPercent: null,
     });
   }
@@ -842,6 +951,7 @@ export function buildSchedule(input: LoanInput): ScheduleResult {
         accruedBalance,
         principalBalance,
         capitalized: 0,
+        drawn: 0,
         irrAnnualPercent: null,
       });
       continue;
@@ -867,6 +977,7 @@ export function buildSchedule(input: LoanInput): ScheduleResult {
           accruedBalance,
           principalBalance,
           capitalized: 0,
+          drawn: 0,
           irrAnnualPercent: null,
         });
         continue;
@@ -898,6 +1009,7 @@ export function buildSchedule(input: LoanInput): ScheduleResult {
         accruedBalance,
         principalBalance,
         capitalized: 0,
+        drawn: 0,
         irrAnnualPercent: null,
       });
       continue;
@@ -918,6 +1030,7 @@ export function buildSchedule(input: LoanInput): ScheduleResult {
         accruedBalance,
         principalBalance,
         capitalized: 0,
+        drawn: 0,
         irrAnnualPercent: null,
       });
       continue;
@@ -943,6 +1056,7 @@ export function buildSchedule(input: LoanInput): ScheduleResult {
       accruedBalance,
       principalBalance,
       capitalized: 0,
+      drawn: 0,
       irrAnnualPercent: null,
     });
   }
@@ -1000,6 +1114,460 @@ export function buildSchedule(input: LoanInput): ScheduleResult {
     principalPlan,
     warnings,
   };
+}
+
+function clipPrincipalRanges(
+  ranges: PrincipalRange[],
+  firstRepaymentNumber: number,
+  count: number,
+): PrincipalRange[] {
+  const last = firstRepaymentNumber + count - 1;
+  const clipped: PrincipalRange[] = [];
+  for (const range of ranges) {
+    const from = Math.max(range.from, firstRepaymentNumber);
+    const to = Math.min(range.to, last);
+    if (from <= to) {
+      clipped.push({
+        from: from - firstRepaymentNumber + 1,
+        to: to - firstRepaymentNumber + 1,
+        amount: range.amount,
+        ...(range.unit === "percent" ? { unit: "percent" as const } : {}),
+      });
+    }
+  }
+  return clipped;
+}
+
+function sumMoney(values: number[]): number {
+  return values.reduce((total, value) => roundCents(total + value), 0);
+}
+
+/** Amortize one draw on the loan's existing period dates. */
+function buildPortionSchedule(
+  input: LoanInput,
+  portionPrincipal: number,
+  firstPeriod: number,
+): ScheduleResult {
+  const perYear = periodsPerYear(input.frequency);
+  const totalPeriods = Math.round(input.termYears * perYear);
+  const gracePeriods = gracePeriodCount(input.graceMonths, input.frequency);
+  const periodicRate = input.annualRatePercent / 100 / perYear;
+  const origination = parseISODate(input.startDate);
+  if (!origination) throw new Error("Invalid start date");
+
+  const rows: ScheduleRow[] = [];
+  let principalBalance = 0;
+  let accruedBalance = 0;
+  let drawRecorded = false;
+  const drawAmount = roundCents(portionPrincipal);
+
+  const takeDraw = (period: number): number => {
+    if (period !== firstPeriod || drawRecorded) return 0;
+    principalBalance = roundCents(principalBalance + drawAmount);
+    drawRecorded = true;
+    return drawAmount;
+  };
+
+  for (let period = 1; period <= gracePeriods; period += 1) {
+    const drawn = takeDraw(period);
+    if (period < firstPeriod) continue;
+    const isLastGrace = period === gracePeriods;
+    let interest = 0;
+    let capitalized = 0;
+
+    if (input.treatment === "subsidized") {
+      interest = 0;
+    } else {
+      interest = roundCents(principalBalance * periodicRate);
+      accruedBalance = roundCents(accruedBalance + interest);
+    }
+
+    if (input.treatment === "capitalize" && isLastGrace) {
+      capitalized = accruedBalance;
+      principalBalance = roundCents(principalBalance + capitalized);
+      accruedBalance = 0;
+    }
+
+    rows.push({
+      period,
+      date: periodDate(origination, period, input.frequency),
+      phase: "grace",
+      payment: 0,
+      interest,
+      principal: 0,
+      accruedApplied: 0,
+      accruedBalance,
+      principalBalance,
+      capitalized,
+      drawn,
+      irrAnnualPercent: null,
+    });
+  }
+
+  const repaymentStart = Math.max(firstPeriod, gracePeriods + 1);
+  const portionCount = totalPeriods - repaymentStart + 1;
+  const duringGrace = firstPeriod <= gracePeriods;
+  const amortizePrincipal =
+    duringGrace && input.treatment === "capitalize"
+      ? principalBalance
+      : drawAmount;
+  const levelPayment = scheduledPayment(
+    amortizePrincipal,
+    periodicRate,
+    portionCount,
+  );
+  const equalPrincipal = input.amortizationMethod === "equal-principal";
+  const scheduledPrincipal = input.amortizationMethod === "scheduled";
+  const firstRepaymentNumber = repaymentStart - gracePeriods;
+  const principalSlice = equalInstallment(amortizePrincipal, portionCount);
+  const principalPlan = scheduledPrincipal
+    ? planPrincipalSchedule(
+        clipPrincipalRanges(
+          input.principalRanges ?? [],
+          firstRepaymentNumber,
+          portionCount,
+        ),
+        portionCount,
+        amortizePrincipal,
+      )
+    : null;
+  const principalAmounts =
+    scheduledPrincipal && principalPlan
+      ? principalPlan.amounts
+      : equalPrincipal
+        ? distributeAmount(amortizePrincipal, portionCount)
+        : null;
+  const accruedSlice =
+    input.treatment === "accrue"
+      ? equalInstallment(accruedBalance, portionCount)
+      : 0;
+  const warnings: string[] = [];
+
+  for (let i = 0; i < portionCount; i += 1) {
+    const period = repaymentStart + i;
+    const drawn = takeDraw(period);
+    const isLast = i === portionCount - 1;
+    const repaymentNumber = firstRepaymentNumber + i;
+    const currentInterest = roundCents(principalBalance * periodicRate);
+
+    if (principalAmounts) {
+      const requested = principalAmounts[i] ?? 0;
+      const principalPay = roundCents(Math.min(requested, principalBalance));
+      if (scheduledPrincipal && roundCents(requested - principalPay) >= 0.01) {
+        warnings.push(
+          `Repayment period ${repaymentNumber} schedules ${moneyText(requested)} of principal, and ${moneyText(principalBalance)} is left.`,
+        );
+      }
+      const accruedApplied =
+        input.treatment === "accrue"
+          ? isLast
+            ? accruedBalance
+            : roundCents(Math.min(accruedSlice, accruedBalance))
+          : 0;
+      const payment = roundCents(currentInterest + accruedApplied + principalPay);
+      principalBalance = roundCents(principalBalance - principalPay);
+      accruedBalance = roundCents(accruedBalance - accruedApplied);
+      rows.push({
+        period,
+        date: periodDate(origination, period, input.frequency),
+        phase: "repayment",
+        payment,
+        interest: currentInterest,
+        principal: principalPay,
+        accruedApplied,
+        accruedBalance,
+        principalBalance,
+        capitalized: 0,
+        drawn,
+        irrAnnualPercent: null,
+      });
+      continue;
+    }
+
+    if (input.treatment === "accrue") {
+      if (isLast) {
+        const principalPay = principalBalance;
+        const accruedApplied = accruedBalance;
+        const payment = roundCents(currentInterest + accruedApplied + principalPay);
+        principalBalance = 0;
+        accruedBalance = 0;
+        rows.push({
+          period,
+          date: periodDate(origination, period, input.frequency),
+          phase: "repayment",
+          payment,
+          interest: currentInterest,
+          principal: principalPay,
+          accruedApplied,
+          accruedBalance,
+          principalBalance,
+          capitalized: 0,
+          drawn,
+          irrAnnualPercent: null,
+        });
+        continue;
+      }
+
+      let remaining = roundCents(levelPayment - currentInterest);
+      let accruedApplied = 0;
+      if (remaining < 0) {
+        accruedBalance = roundCents(accruedBalance - remaining);
+        remaining = 0;
+      } else {
+        accruedApplied = roundCents(Math.min(remaining, accruedBalance));
+        accruedBalance = roundCents(accruedBalance - accruedApplied);
+        remaining = roundCents(remaining - accruedApplied);
+      }
+      const principalPay = roundCents(Math.min(remaining, principalBalance));
+      principalBalance = roundCents(principalBalance - principalPay);
+      rows.push({
+        period,
+        date: periodDate(origination, period, input.frequency),
+        phase: "repayment",
+        payment: levelPayment,
+        interest: currentInterest,
+        principal: principalPay,
+        accruedApplied,
+        accruedBalance,
+        principalBalance,
+        capitalized: 0,
+        drawn,
+        irrAnnualPercent: null,
+      });
+      continue;
+    }
+
+    if (isLast) {
+      const principalPay = principalBalance;
+      const payment = roundCents(currentInterest + principalPay);
+      principalBalance = 0;
+      rows.push({
+        period,
+        date: periodDate(origination, period, input.frequency),
+        phase: "repayment",
+        payment,
+        interest: currentInterest,
+        principal: principalPay,
+        accruedApplied: 0,
+        accruedBalance,
+        principalBalance,
+        capitalized: 0,
+        drawn,
+        irrAnnualPercent: null,
+      });
+      continue;
+    }
+
+    let principalPay = roundCents(levelPayment - currentInterest);
+    if (principalPay > principalBalance) principalPay = principalBalance;
+    if (principalPay < 0) principalPay = 0;
+    principalBalance = roundCents(principalBalance - principalPay);
+    rows.push({
+      period,
+      date: periodDate(origination, period, input.frequency),
+      phase: "repayment",
+      payment: levelPayment,
+      interest: currentInterest,
+      principal: principalPay,
+      accruedApplied: 0,
+      accruedBalance,
+      principalBalance,
+      capitalized: 0,
+      drawn,
+      irrAnnualPercent: null,
+    });
+  }
+
+  if (scheduledPrincipal && principalBalance >= 0.01) {
+    warnings.push(
+      `${moneyText(principalBalance)} of principal is still unpaid after the last repayment period.`,
+    );
+  }
+
+  const cashFlows = [-drawAmount];
+  for (const row of rows) {
+    cashFlows.push(row.payment);
+    row.irrAnnualPercent = annualizedIrrPercent(periodicIrr(cashFlows), perYear);
+  }
+
+  const totals = totalsOf(rows);
+  return {
+    input: { ...input, principal: drawAmount, tranches: undefined },
+    periodicRate,
+    periodsPerYear: perYear,
+    totalPeriods,
+    gracePeriods,
+    repaymentPeriods: portionCount,
+    scheduledPayment: scheduledPrincipal
+      ? (rows.find((row) => row.phase === "repayment")?.payment ?? 0)
+      : equalPrincipal
+        ? principalSlice
+        : levelPayment,
+    rows,
+    totals,
+    irrAnnualPercent: rows.at(-1)?.irrAnnualPercent ?? null,
+    showAccrued: input.treatment === "accrue" && duringGrace,
+    showCapitalized: input.treatment === "capitalize" && duringGrace,
+    amortizingPrincipal: amortizePrincipal,
+    principalPlan,
+    warnings,
+  };
+}
+
+function totalsOf(rows: ScheduleRow[]): ScheduleTotals {
+  return rows.reduce<ScheduleTotals>(
+    (acc, row) => ({
+      paid: roundCents(acc.paid + row.payment),
+      interest: roundCents(acc.interest + row.interest),
+      principal: roundCents(acc.principal + row.principal),
+      accruedApplied: roundCents(acc.accruedApplied + row.accruedApplied),
+      capitalized: roundCents(acc.capitalized + row.capitalized),
+    }),
+    { paid: 0, interest: 0, principal: 0, accruedApplied: 0, capitalized: 0 },
+  );
+}
+
+function zeroRow(
+  period: number,
+  date: string,
+  phase: ScheduleRow["phase"],
+): ScheduleRow {
+  return {
+    period,
+    date,
+    phase,
+    payment: 0,
+    interest: 0,
+    principal: 0,
+    accruedApplied: 0,
+    accruedBalance: 0,
+    principalBalance: 0,
+    capitalized: 0,
+    drawn: 0,
+    irrAnnualPercent: null,
+  };
+}
+
+function buildConsolidatedSchedule(input: LoanInput): ScheduleResult {
+  const perYear = periodsPerYear(input.frequency);
+  const totalPeriods = Math.round(input.termYears * perYear);
+  const gracePeriods = gracePeriodCount(input.graceMonths, input.frequency);
+  const repaymentPeriods = totalPeriods - gracePeriods;
+  const periodicRate = input.annualRatePercent / 100 / perYear;
+  const origination = parseISODate(input.startDate);
+  if (!origination) throw new Error("Invalid start date");
+  if (repaymentPeriods < 1) {
+    throw new Error("Repayment term must include at least one period");
+  }
+
+  const tranches = input.tranches ?? [];
+  const trancheSchedules: TrancheSchedule[] = [];
+  for (const [index, tranche] of tranches.entries()) {
+    const date = parseISODate(tranche.date);
+    if (!date) continue;
+    const firstPeriod = trancheStartPeriod(
+      origination,
+      date,
+      input.frequency,
+      totalPeriods,
+    );
+    if (firstPeriod === null) continue;
+    trancheSchedules.push({
+      index: index + 1,
+      date: tranche.date,
+      amount: tranche.amount,
+      firstPeriod,
+      result: buildPortionSchedule(input, tranche.amount, firstPeriod),
+    });
+  }
+
+  const rows: ScheduleRow[] = [];
+  for (let period = 1; period <= totalPeriods; period += 1) {
+    const parts = trancheSchedules
+      .map((tranche) => tranche.result.rows.find((row) => row.period === period))
+      .filter((row): row is ScheduleRow => row !== undefined);
+    const phase = period <= gracePeriods ? "grace" : "repayment";
+    const date = periodDate(origination, period, input.frequency);
+    if (parts.length === 0) {
+      rows.push(zeroRow(period, date, phase));
+      continue;
+    }
+    rows.push({
+      period,
+      date,
+      phase,
+      payment: sumMoney(parts.map((row) => row.payment)),
+      interest: sumMoney(parts.map((row) => row.interest)),
+      principal: sumMoney(parts.map((row) => row.principal)),
+      accruedApplied: sumMoney(parts.map((row) => row.accruedApplied)),
+      accruedBalance: sumMoney(parts.map((row) => row.accruedBalance)),
+      principalBalance: sumMoney(parts.map((row) => row.principalBalance)),
+      capitalized: sumMoney(parts.map((row) => row.capitalized)),
+      drawn: sumMoney(parts.map((row) => row.drawn)),
+      irrAnnualPercent: null,
+    });
+  }
+
+  const opening = sumMoney(
+    trancheSchedules
+      .filter((tranche) => tranche.firstPeriod === 1)
+      .map((tranche) => tranche.amount),
+  );
+  const nettedDraw = Array.from({ length: totalPeriods + 1 }, () => 0);
+  for (const tranche of trancheSchedules) {
+    if (tranche.firstPeriod > 1) {
+      nettedDraw[tranche.firstPeriod - 1] = roundCents(
+        nettedDraw[tranche.firstPeriod - 1] + tranche.amount,
+      );
+    }
+  }
+  const cashFlows = [-opening];
+  for (const row of rows) {
+    cashFlows.push(roundCents(row.payment - (nettedDraw[row.period] ?? 0)));
+    row.irrAnnualPercent = annualizedIrrPercent(periodicIrr(cashFlows), perYear);
+  }
+
+  const warnings = trancheSchedules.flatMap((tranche) =>
+    tranche.result.warnings.map((warning) => `Tranche ${tranche.index}: ${warning}`),
+  );
+  const drawnSum = sumMoney(tranches.map((tranche) => tranche.amount));
+  const commitment = roundCents(input.principal);
+  if (tranches.length === 0) {
+    warnings.push("Add a valid tranche to draw principal.");
+  } else if (drawnSum !== commitment) {
+    warnings.push(
+      `Tranches draw ${moneyText(drawnSum)} of the ${moneyText(commitment)} principal.`,
+    );
+  }
+
+  const firstRepayment = rows.find((row) => row.phase === "repayment");
+  return {
+    input,
+    periodicRate,
+    periodsPerYear: perYear,
+    totalPeriods,
+    gracePeriods,
+    repaymentPeriods,
+    scheduledPayment: firstRepayment?.payment ?? 0,
+    rows,
+    totals: totalsOf(rows),
+    irrAnnualPercent: rows.at(-1)?.irrAnnualPercent ?? null,
+    showAccrued: trancheSchedules.some((tranche) => tranche.result.showAccrued),
+    showCapitalized: trancheSchedules.some(
+      (tranche) => tranche.result.showCapitalized,
+    ),
+    amortizingPrincipal: sumMoney(
+      trancheSchedules.map((tranche) => tranche.result.amortizingPrincipal),
+    ),
+    principalPlan: null,
+    warnings,
+    trancheSchedules,
+  };
+}
+
+export function buildSchedule(input: LoanInput): ScheduleResult {
+  if (input.tranches === undefined) return buildSingleSchedule(input);
+  return buildConsolidatedSchedule(input);
 }
 
 export function compareTreatments(input: LoanInput): ComparisonRow[] {

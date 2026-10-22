@@ -18,8 +18,10 @@ export function ScheduleTable({
   result,
   principalEditor,
   principalColumn,
+  showDrawn = false,
 }: {
   result: ScheduleResult;
+  showDrawn?: boolean;
   principalColumn?: {
     unit: PrincipalUnit;
     onUnitChange: (unit: PrincipalUnit) => void;
@@ -40,6 +42,9 @@ export function ScheduleTable({
           <TableHead>Phase</TableHead>
           <TableHead className="text-right">Payment</TableHead>
           <TableHead className="text-right">Interest</TableHead>
+          {showDrawn ? (
+            <TableHead className="text-right">Drawn</TableHead>
+          ) : null}
           <TableHead className="text-right">
             {principalColumn ? (
               <span className="inline-flex items-center justify-end gap-1.5 whitespace-nowrap">
@@ -84,6 +89,11 @@ export function ScheduleTable({
             <TableCell className="text-right tabular-nums">
               {formatMoney(row.interest)}
             </TableCell>
+            {showDrawn ? (
+              <TableCell className="text-right tabular-nums">
+                {formatMoney(row.drawn)}
+              </TableCell>
+            ) : null}
             <TableCell className="text-right tabular-nums">
               {principalEditor && row.phase === "repayment" ? (
                 <span className="ml-auto inline-flex items-center justify-end gap-1">
@@ -150,6 +160,16 @@ export function ScheduleTable({
           <TableCell className="text-right tabular-nums">
             {formatMoney(result.totals.interest)}
           </TableCell>
+          {showDrawn ? (
+            <TableCell className="text-right tabular-nums">
+              {formatMoney(
+                result.rows.reduce(
+                  (total, row) => Math.round((total + row.drawn) * 100) / 100,
+                  0,
+                ),
+              )}
+            </TableCell>
+          ) : null}
           <TableCell className="text-right tabular-nums">
             {formatMoney(result.totals.principal)}
           </TableCell>

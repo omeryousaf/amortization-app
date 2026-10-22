@@ -41,14 +41,23 @@ const defaultValues: FormValues = {
   amortizationMethod: "level",
   principalRanges: [],
   principalUnit: "amount",
+  tranches: [],
 };
 
 export function LoanCalculator() {
   const [values, setValues] = useState<FormValues>(defaultValues);
+  const [scheduleTab, setScheduleTab] = useState(0);
 
   const parsed = useMemo(() => parseLoanForm(values), [values]);
 
   const result = parsed.ok ? buildSchedule(parsed.input) : null;
+  const trancheSchedules = result?.trancheSchedules ?? [];
+  const activeTab = Math.min(scheduleTab, trancheSchedules.length);
+  const schedule = result
+    ? activeTab > 0
+      ? (trancheSchedules[activeTab - 1]?.result ?? result)
+      : result
+    : null;
   const comparison =
     parsed.ok && parsed.input.graceMonths > 0
       ? compareTreatments(parsed.input)
@@ -65,8 +74,9 @@ export function LoanCalculator() {
         </h1>
         <p className="max-w-2xl text-sm leading-6 text-muted-foreground sm:text-base">
           Build a fully amortizing schedule with a level installment, equal
-          principal, or a principal schedule you set. When a grace period is
-          included, compare
+          principal, or a principal schedule you set. Draw the loan in
+          tranches to get one table per tranche plus a consolidated table.
+          When a grace period is included, compare
           capitalizing interest, holding it in a separate accrued bucket, or
           having the lender subsidize it.
         </p>
@@ -86,7 +96,8 @@ export function LoanCalculator() {
               values={values}
               errors={parsed.ok ? {} : parsed.empty ? {} : parsed.errors}
               rangeErrors={parsed.rangeErrors}
-              warnings={result?.warnings ?? []}
+              trancheErrors={parsed.trancheErrors}
+              warnings={result?.trancheSchedules ? [] : (result?.warnings ?? [])}
               principalPlan={result?.principalPlan ?? null}
               includesCapitalizedInterest={result?.showCapitalized ?? false}
               onChange={(patch) => {
@@ -118,53 +129,58 @@ export function LoanCalculator() {
             </Alert>
           ) : null}
 
-          {result ? (
+          {result && schedule ? (
             <>
               <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
                 <SummaryCard
                   label={
-                    result.input.amortizationMethod === "scheduled"
+                    trancheSchedules.length > 0 && activeTab === 0
                       ? "First installment"
-                      : result.input.amortizationMethod === "equal-principal"
-                        ? "Principal each period"
-                        : "Level payment"
+                      : schedule.input.amortizationMethod === "scheduled"
+                        ? "First installment"
+                        : schedule.input.amortizationMethod === "equal-principal"
+                          ? "Principal each period"
+                          : "Level payment"
                   }
-                  value={formatMoney(result.scheduledPayment)}
+                  value={formatMoney(schedule.scheduledPayment)}
                   hint={
-                    result.input.amortizationMethod === "scheduled"
-                      ? "Interest plus the principal scheduled for the first repayment period. Later installments change as both change."
-                      : result.input.amortizationMethod === "equal-principal"
-                        ? `${FREQUENCY_META[result.input.frequency].label} principal reduction. The installment declines as interest falls; the last period absorbs leftover cents.`
-                        : `${FREQUENCY_META[result.input.frequency].label} · ${result.totalPeriods} periods. Last installment absorbs leftover cents.`
+                    trancheSchedules.length > 0 && activeTab === 0
+                      ? "Combined payment on the first repayment date. Later dates change as tranches are drawn."
+                      : schedule.input.amortizationMethod === "scheduled"
+                        ? "Interest plus the principal scheduled for the first repayment period. Later installments change as both change."
+                        : schedule.input.amortizationMethod === "equal-principal"
+                          ? `${FREQUENCY_META[schedule.input.frequency].label} principal reduction. The installment declines as interest falls; the last period absorbs leftover cents.`
+                          : `${FREQUENCY_META[schedule.input.frequency].label} · ${schedule.rows.length} periods. Last installment absorbs leftover cents.`
                   }
                 />
                 <SummaryCard
                   label="Total paid"
-                  value={formatMoney(result.totals.paid)}
-                  hint={`${result.repaymentPeriods} ${FREQUENCY_META[result.input.frequency].label.toLowerCase()} repayment ${result.repaymentPeriods === 1 ? "period" : "periods"}`}
+                  value={formatMoney(schedule.totals.paid)}
+                  hint={`${schedule.repaymentPeriods} ${FREQUENCY_META[schedule.input.frequency].label.toLowerCase()} repayment ${schedule.repaymentPeriods === 1 ? "period" : "periods"}`}
                 />
                 <SummaryCard
                   label="Total interest"
-                  value={formatMoney(result.totals.interest)}
+                  value={formatMoney(schedule.totals.interest)}
                   hint="Borrower-paid interest over the full schedule."
                 />
                 <SummaryCard
                   label="IRR"
-                  value={formatIrr(result.irrAnnualPercent)}
+                  value={formatIrr(schedule.irrAnnualPercent)}
                   hint="Annualized internal rate of return of disbursement vs. the payment stream."
                 />
                 <SummaryCard
                   label="First payment date"
                   value={
-                    result.rows.find((row) => row.payment > 0)?.date
+                    schedule.rows.find((row) => row.payment > 0)?.date
                       ? formatDate(
-                          result.rows.find((row) => row.payment > 0)!.date,
+                          schedule.rows.find((row) => row.payment > 0)!.date,
                         )
                       : "—"
                   }
                   hint={
-                    result.gracePeriods > 0
-                      ? `${result.gracePeriods} grace ${result.gracePeriods === 1 ? "period" : "periods"} before repayment`
+                    schedule.gracePeriods > 0 &&
+                    schedule.rows.some((row) => row.phase === "grace")
+                      ? `${schedule.rows.filter((row) => row.phase === "grace").length} grace ${schedule.rows.filter((row) => row.phase === "grace").length === 1 ? "period" : "periods"} before repayment`
                       : "No grace; repayment starts at period 1"
                   }
                 />
@@ -261,31 +277,100 @@ export function LoanCalculator() {
 
               <Card>
                 <CardHeader>
-                  <CardTitle>Amortization schedule</CardTitle>
+                  <CardTitle>
+                    {activeTab === 0
+                      ? "Amortization schedule"
+                      : `Tranche ${activeTab}`}
+                  </CardTitle>
                   <CardDescription>
-                    {result.input.amortizationMethod === "scheduled"
-                      ? "Each repayment period reduces principal by the amount or percent of principal you scheduled. Interest is charged on the current principal and added to that amount."
-                      : result.input.amortizationMethod === "equal-principal"
-                        ? "Each repayment period reduces principal by the same amount. Interest is charged on the current principal, so the installment declines."
-                        : "The installment stays level. Interest is charged on the current principal, and the rest of the installment reduces principal."}{" "}
-                    {result.showAccrued
-                      ? result.input.amortizationMethod === "level"
-                        ? "A level payment covers current interest, then accrued grace interest, then principal."
-                        : "Accrued grace interest is paid in equal slices alongside principal."
-                      : null}{" "}
-                    The final payment clears remaining principal
-                    {result.showAccrued ? " and any leftover accrued interest" : ""}.
-                    IRR is annualized to date on the same compounding basis as
-                    the loan rate (disbursement at start, then each
-                    period&apos;s payment). Grace periods with a $0 payment
-                    show an em dash until cash starts coming back.
+                    {trancheSchedules.length > 0 && activeTab === 0
+                      ? "This table adds every tranche schedule together. Each other tab is one tranche, amortized on its own from its draw date through the end of the term."
+                      : activeTab > 0
+                        ? `This tranche draws ${formatMoney(trancheSchedules[activeTab - 1]?.amount ?? 0)} on ${formatDate(trancheSchedules[activeTab - 1]?.date ?? schedule.input.startDate)} and amortizes that amount alone.`
+                        : schedule.input.amortizationMethod === "scheduled"
+                          ? "Each repayment period reduces principal by the amount or percent of principal you scheduled. Interest is charged on the current principal and added to that amount."
+                          : schedule.input.amortizationMethod === "equal-principal"
+                            ? "Each repayment period reduces principal by the same amount. Interest is charged on the current principal, so the installment declines."
+                            : "The installment stays level. Interest is charged on the current principal, and the rest of the installment reduces principal."}{" "}
+                    {trancheSchedules.length === 0 ? (
+                      <>
+                        {schedule.showAccrued
+                          ? schedule.input.amortizationMethod === "level"
+                            ? "A level payment covers current interest, then accrued grace interest, then principal."
+                            : "Accrued grace interest is paid in equal slices alongside principal."
+                          : null}{" "}
+                        The final payment clears remaining principal
+                        {schedule.showAccrued
+                          ? " and any leftover accrued interest"
+                          : ""}
+                        . IRR is annualized to date on the same compounding
+                        basis as the loan rate. Grace periods with a $0 payment
+                        show an em dash until cash starts coming back.
+                      </>
+                    ) : null}
                   </CardDescription>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="grid gap-4">
+                  {trancheSchedules.length > 0 ? (
+                    <div
+                      role="tablist"
+                      aria-label="Amortization tables"
+                      className="flex flex-wrap gap-2"
+                    >
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={activeTab === 0}
+                        onClick={() => setScheduleTab(0)}
+                        className={cn(
+                          "rounded-lg border px-3 py-1.5 text-sm",
+                          activeTab === 0
+                            ? "border-foreground/20 bg-muted font-medium"
+                            : "border-border hover:bg-muted/50",
+                        )}
+                      >
+                        Consolidated
+                      </button>
+                      {trancheSchedules.map((tranche) => (
+                        <button
+                          key={`${tranche.index}-${tranche.date}-${tranche.amount}`}
+                          type="button"
+                          role="tab"
+                          aria-selected={activeTab === tranche.index}
+                          onClick={() => setScheduleTab(tranche.index)}
+                          className={cn(
+                            "rounded-lg border px-3 py-1.5 text-sm",
+                            activeTab === tranche.index
+                              ? "border-foreground/20 bg-muted font-medium"
+                              : "border-border hover:bg-muted/50",
+                          )}
+                        >
+                          Tranche {tranche.index}
+                          <span className="ml-1 text-muted-foreground">
+                            {formatMoney(tranche.amount)}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  {activeTab === 0 && result.warnings.length > 0 ? (
+                    <div className="grid gap-1">
+                      {result.warnings.map((warning, index) => (
+                        <p
+                          key={`${warning}-${index}`}
+                          className="text-xs text-destructive"
+                          role="alert"
+                        >
+                          {warning}
+                        </p>
+                      ))}
+                    </div>
+                  ) : null}
                   <ScheduleTable
-                    result={result}
+                    result={schedule}
+                    showDrawn={trancheSchedules.length > 0}
                     principalColumn={
-                      result.input.amortizationMethod === "scheduled"
+                      schedule.input.amortizationMethod === "scheduled"
                         ? {
                             unit: principalUnit(values.principalUnit),
                             onUnitChange: (unit) =>
@@ -298,7 +383,7 @@ export function LoanCalculator() {
                                   convertPrincipalRange(
                                     range,
                                     unit,
-                                    result.amortizingPrincipal,
+                                    schedule.amortizingPrincipal,
                                   ),
                                 ),
                               })),
@@ -306,8 +391,10 @@ export function LoanCalculator() {
                         : undefined
                     }
                     principalEditor={
-                      result.input.amortizationMethod === "scheduled" &&
-                      result.repaymentPeriods <= EDITABLE_PRINCIPAL_PERIOD_LIMIT
+                      trancheSchedules.length === 0 &&
+                      schedule.input.amortizationMethod === "scheduled" &&
+                      schedule.repaymentPeriods <=
+                        EDITABLE_PRINCIPAL_PERIOD_LIMIT
                         ? {
                             gracePeriods: result.gracePeriods,
                             value: (repaymentPeriod, paidPrincipal) =>

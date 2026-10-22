@@ -1,6 +1,7 @@
 "use client";
 
 import { PrincipalScheduleEditor } from "@/components/principal-schedule-editor";
+import { TrancheEditor } from "@/components/tranche-editor";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -30,6 +31,7 @@ interface LoanFormProps {
   values: FormValues;
   errors: FieldErrors;
   rangeErrors: string[];
+  trancheErrors: string[];
   warnings: string[];
   principalPlan: PrincipalPlan | null;
   includesCapitalizedInterest: boolean;
@@ -54,6 +56,7 @@ export function LoanForm({
   values,
   errors,
   rangeErrors,
+  trancheErrors,
   warnings,
   principalPlan,
   includesCapitalizedInterest,
@@ -242,6 +245,14 @@ export function LoanForm({
           </AlertDescription>
         </Alert>
       )}
+
+      <TrancheEditor
+        tranches={values.tranches ?? []}
+        trancheErrors={trancheErrors}
+        startDate={values.startDate}
+        principal={values.principal}
+        onChange={(tranches) => onChange({ tranches })}
+      />
 
       {values.amortizationMethod === "scheduled" ? (
         <PrincipalScheduleEditor

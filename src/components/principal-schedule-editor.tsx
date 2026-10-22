@@ -43,8 +43,10 @@ export function PrincipalScheduleEditor({
           : "Enter a valid loan to see how much principal must be scheduled."}{" "}
         Choose $ or % in the principal column. A percent is a share of the
         principal being repaid, and a range applies it to every period it
-        covers. Later ranges replace earlier ones on the same period. Period 1
-        is the first repayment, after any grace.
+        covers. When the loan is drawn in tranches, a dollar amount is applied
+        to each tranche and a percent is of that tranche&apos;s own principal.
+        Later ranges replace earlier ones on the same period. Period 1 is the
+        first repayment, after any grace.
         {plan && plan.amounts.length <= EDITABLE_PRINCIPAL_PERIOD_LIMIT
           ? " This schedule is short enough to edit principal in the table too."
           : ""}

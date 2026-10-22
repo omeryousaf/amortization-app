@@ -33,6 +33,7 @@ npm run start
 - Fixed interest rate
 - Fully amortizing after grace (no balloon), by level payment, equal principal, or a scheduled principal
 - Scheduled principal: ordered ranges set the principal for repayment periods, as a currency amount or as a percent of the principal being repaid (including interest capitalized at the end of grace). The principal column header switches between $ and %. In percent mode each cell is that share of principal for one repayment period. The percent applies to every period in a range. Later ranges replace earlier ones. Periods with no range share any principal the ranges did not claim. The schedule still renders when the amounts do not match the balance
+- Optional tranches: each draw is amortized on its own from its draw date through the end of the term, and a consolidated table adds those schedules together. With no tranches, the full principal is drawn on the start date
 - Payments in arrears
 - Accrual matches payment frequency
 - Scheduled amounts are rounded to the cent; the last payment absorbs leftover cents
